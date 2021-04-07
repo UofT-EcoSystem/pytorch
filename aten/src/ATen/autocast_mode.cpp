@@ -37,9 +37,9 @@ namespace {
 //
 // I'm not using the weak_intrusive_ptr as the key because it's more difficult to compare
 // directly against incoming TensorImpl*s.
-using weakref_type = c10::weak_intrusive_ptr<TensorImpl, UndefinedTensorImpl>;
-using val_type = std::tuple<weakref_type, Tensor>;
-thread_local std::unordered_map<TensorImpl*, val_type> cached_casts;
+// using weakref_type = c10::weak_intrusive_ptr<TensorImpl, UndefinedTensorImpl>;
+// using val_type = std::tuple<weakref_type, Tensor>;
+// thread_local std::unordered_map<TensorImpl*, val_type> cached_casts;
 
 // nesting tracks the nesting depth of the Python-side context manager.
 // When the autocast context manager exits to a nesting level that's outside
@@ -49,7 +49,7 @@ thread_local int nesting = 0;
 }
 
 void clear_cache() {
-  cached_casts.clear();
+//  cached_casts.clear();
 }
 
 int increment_nesting() {
@@ -66,21 +66,17 @@ int decrement_nesting() {
 // extern thread_local in the header.
 Tensor cached_cast(at::ScalarType to_type, const Tensor& arg) {
   if (is_eligible(arg) && (arg.scalar_type() != to_type)) {
-    // Heuristic:  Do what Apex does, and cache fp16 casts of fp32 model weights (leaves).
-    // See cached_casts declaration above for detailed strategy.
-    bool can_try_cache = (to_type == at::kHalf && arg.scalar_type() == at::kFloat && arg.requires_grad() && arg.is_leaf() && !arg.is_view());
-    if (can_try_cache) {
-      auto it = cached_casts.find(arg.unsafeGetTensorImpl());
-      if (it != cached_casts.end()) {
-        return std::get<1>(it->second);
-      } else {
-        auto casted_arg = arg.to(to_type);
-        cached_casts.emplace(arg.unsafeGetTensorImpl(), val_type{weakref_type(arg.getIntrusivePtr()), casted_arg});
-        return casted_arg;
-      }
-    } else {
-      return arg.to(to_type);
-    }
+    return arg.to(to_type);
+  } else {
+    return arg;
+  }
+}
+
+Tensor cached_cast_grad(at::ScalarType to_type, const Tensor& arg, bool requires_grad) {
+  if (is_eligible(arg) && (arg.scalar_type() != to_type)) {
+    auto rval = arg.detach();
+    rval.requires_grad_(requires_grad);
+    return rval.to(to_type);
   } else {
     return arg;
   }
@@ -231,6 +227,13 @@ The stuff below could be codegenned.  Ed said
 Therefore, for the moment, this is all copy pasted in from VariableTypeEverything.cpp with appropriate substitutions.
 ********************************************************************************************************************/
 
+Tensor linear_autocast(const Tensor& input, const Tensor& weight, const c10::optional<Tensor>& bias) {
+  c10::impl::ExcludeDispatchKeyGuard no_autocast(c10::DispatchKey::Autocast);
+  return at::linear(cached_cast(at::kHalf, input),
+                  cached_cast_grad(at::kHalf, weight, false),
+		  cached_cast(at::kHalf, bias));
+}
+
 #define ADD_NS(RAW_OP) at::RAW_OP
 
 // Common cases where registration signature matches redispatch signature
@@ -277,7 +280,7 @@ TORCH_LIBRARY_IMPL(aten, Autocast, m) {
   KERNEL(ADD_NS(matmul), "matmul", Tensor (const Tensor &, const Tensor &), fp16)
   KERNEL(ADD_NS(mm), "mm", Tensor (const Tensor &, const Tensor &), fp16)
   KERNEL(ADD_NS(mv), "mv", Tensor (const Tensor &, const Tensor &), fp16)
-  KERNEL(ADD_NS(linear), "linear", Tensor (const Tensor &, const Tensor &, const c10::optional<Tensor>&), fp16)
+//  KERNEL(ADD_NS(linear), "linear", Tensor (const Tensor &, const Tensor &, const c10::optional<Tensor>&), fp16)
   KERNEL(ADD_NS(addbmm), "addbmm", Tensor (const Tensor &, const Tensor &, const Tensor &, const Scalar&, const Scalar&), fp16)
   KERNEL(ADD_NS(baddbmm), "baddbmm", Tensor (const Tensor &, const Tensor &, const Tensor &, const Scalar&, const Scalar&), fp16)
   KERNEL(ADD_NS(bmm), "bmm", Tensor (const Tensor &, const Tensor &), fp16)
@@ -411,6 +414,8 @@ TORCH_LIBRARY_IMPL(aten, Autocast, m) {
 
   m.impl(TORCH_SELECTIVE_NAME("aten::binary_cross_entropy"),
          TORCH_FN((&at::autocast::binary_cross_entropy_banned)));
+  
+  m.impl("linear", linear_autocast);
 }
 
 }

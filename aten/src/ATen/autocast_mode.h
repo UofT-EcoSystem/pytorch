@@ -82,6 +82,8 @@ inline bool is_eligible(const Tensor& arg) {
 // Overload to catch Tensor args
 TORCH_API Tensor cached_cast(at::ScalarType to_type, const Tensor& arg);
 
+TORCH_API Tensor cached_cast_grad(at::ScalarType to_type, const Tensor& arg, bool requires_grad);
+
 // Overload to process optional<Tensor>
 inline c10::optional<Tensor> cached_cast(at::ScalarType to_type, const c10::optional<Tensor>& arg) {
   if (arg.has_value()) {
